@@ -10,4 +10,4 @@ client: client.cpp
 	$(CXX) $(CXXFLAGS) -o client client.cpp
 
 clean:
-	rm -f server client remote_terminal
+	rm -f server client

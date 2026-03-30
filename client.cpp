@@ -9,8 +9,9 @@
 #include <termios.h>
 #include <stdlib.h>
 #include <getopt.h>
+#include <netdb.h>
 
-#define DEFAULT_PORT 2222
+#define DEFAULT_PORT "2222"
 #define DEFAULT_HOST "127.0.0.1"
 #define BUFFER_SIZE 4096
 
@@ -37,7 +38,7 @@ void print_usage(char *prog_name) {
 
 int main(int argc, char *argv[]) {
     std::string host = DEFAULT_HOST;
-    int port = DEFAULT_PORT;
+    std::string port = DEFAULT_PORT;
 
     int opt;
     while ((opt = getopt(argc, argv, "h:p:?")) != -1) {
@@ -46,7 +47,7 @@ int main(int argc, char *argv[]) {
                 host = optarg;
                 break;
             case 'p':
-                port = atoi(optarg);
+                port = optarg;
                 break;
             case '?':
             default:
@@ -55,24 +56,40 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("socket");
+    struct addrinfo hints, *servinfo, *p;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int rv;
+    if ((rv = getaddrinfo(host.c_str(), port.c_str(), &hints, &servinfo)) != 0) {
+        std::cerr << "getaddrinfo: " << gai_strerror(rv) << std::endl;
         return 1;
     }
 
-    struct sockaddr_in serv_addr;
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &serv_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid address/ Address not supported" << std::endl;
-        return 1;
+    int sock;
+    for(p = servinfo; p != NULL; p = p->ai_next) {
+        if ((sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+            perror("client: socket");
+            continue;
+        }
+
+        if (connect(sock, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sock);
+            perror("client: connect");
+            continue;
+        }
+
+        break;
     }
 
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        perror("connect");
-        return 1;
+    if (p == NULL) {
+        std::cerr << "client: failed to connect" << std::endl;
+        freeaddrinfo(servinfo);
+        return 2;
     }
+
+    freeaddrinfo(servinfo);
 
     std::cout << "Connected to " << host << ":" << port << std::endl;
     std::cout << "Switching to raw mode..." << std::endl;
@@ -95,13 +112,13 @@ int main(int argc, char *argv[]) {
         if (FD_ISSET(STDIN_FILENO, &read_fds)) {
             ssize_t n = read(STDIN_FILENO, buffer, sizeof(buffer));
             if (n <= 0) break;
-            if (write(sock, buffer, n) != n) break;
+            if (write(sock, buffer, n) != (ssize_t)n) break;
         }
 
         if (FD_ISSET(sock, &read_fds)) {
             ssize_t n = read(sock, buffer, sizeof(buffer));
             if (n <= 0) break;
-            if (write(STDOUT_FILENO, buffer, n) != n) break;
+            if (write(STDOUT_FILENO, buffer, n) != (ssize_t)n) break;
         }
     }
 

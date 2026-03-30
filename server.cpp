@@ -12,12 +12,20 @@
 #include <termios.h>
 #include <stdlib.h>
 #include <getopt.h>
+#include <signal.h>
 
 #define DEFAULT_PORT 2222
 #define DEFAULT_ADDR "0.0.0.0"
 #define BUFFER_SIZE 4096
 
-void handle_client(int client_fd) {
+// Clean up zombie processes
+void sigchld_handler(int) {
+    int saved_errno = errno;
+    while (waitpid(-1, NULL, WNOHANG) > 0);
+    errno = saved_errno;
+}
+
+void handle_client(int client_fd, int server_fd) {
     int master_fd = posix_openpt(O_RDWR);
     if (master_fd < 0) {
         perror("posix_openpt");
@@ -51,10 +59,9 @@ void handle_client(int client_fd) {
     }
 
     if (pid == 0) {
-        // Child process
+        // Child process (PTY slave side)
         close(client_fd);
-        // Note: server_fd is not accessible here easily without passing it,
-        // but in a real app we should close all inherited FDs except the ones we need.
+        close(server_fd); // Fix FD leak
         setsid();
 
         int slave_fd = open(slave_name, O_RDWR);
@@ -79,7 +86,8 @@ void handle_client(int client_fd) {
         perror("execlp");
         exit(1);
     } else {
-        // Parent process
+        // Parent process (Proxy loop)
+        close(server_fd); // Fix FD leak in the process that handles client I/O
         fd_set read_fds;
         char buffer[BUFFER_SIZE];
 
@@ -91,6 +99,7 @@ void handle_client(int client_fd) {
             int max_fd = (client_fd > master_fd) ? client_fd : master_fd;
 
             if (select(max_fd + 1, &read_fds, NULL, NULL, NULL) < 0) {
+                if (errno == EINTR) continue;
                 perror("select");
                 break;
             }
@@ -109,7 +118,9 @@ void handle_client(int client_fd) {
         }
 
         close(master_fd);
+        close(client_fd);
         waitpid(pid, NULL, 0);
+        exit(0); // Exit the client-handling process
     }
 }
 
@@ -139,6 +150,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+        perror("sigaction");
+        return 1;
+    }
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
@@ -161,7 +181,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if (listen(server_fd, 3) < 0) {
+    if (listen(server_fd, 5) < 0) {
         perror("listen");
         return 1;
     }
@@ -173,14 +193,25 @@ int main(int argc, char *argv[]) {
         socklen_t addrlen = sizeof(client_address);
         int client_fd = accept(server_fd, (struct sockaddr *)&client_address, &addrlen);
         if (client_fd < 0) {
+            if (errno == EINTR) continue;
             perror("accept");
             continue;
         }
 
         std::cout << "Client connected from " << inet_ntoa(client_address.sin_addr) << std::endl;
-        handle_client(client_fd);
-        close(client_fd);
-        std::cout << "Client disconnected" << std::endl;
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Child handling process
+            handle_client(client_fd, server_fd);
+            // handle_client calls exit(0)
+        } else if (pid > 0) {
+            // Parent listening process
+            close(client_fd);
+        } else {
+            perror("fork");
+            close(client_fd);
+        }
     }
 
     close(server_fd);
