@@ -6,12 +6,15 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <stdlib.h>
+#include <getopt.h>
 
-#define PORT 2222
+#define DEFAULT_PORT 2222
+#define DEFAULT_ADDR "0.0.0.0"
 #define BUFFER_SIZE 4096
 
 void handle_client(int client_fd) {
@@ -50,6 +53,8 @@ void handle_client(int client_fd) {
     if (pid == 0) {
         // Child process
         close(client_fd);
+        // Note: server_fd is not accessible here easily without passing it,
+        // but in a real app we should close all inherited FDs except the ones we need.
         setsid();
 
         int slave_fd = open(slave_name, O_RDWR);
@@ -108,20 +113,48 @@ void handle_client(int client_fd) {
     }
 }
 
-int main() {
+void print_usage(char *prog_name) {
+    std::cout << "Usage: " << prog_name << " [-p port] [-a address]" << std::endl;
+    std::cout << "  -p port     Port to listen on (default: " << DEFAULT_PORT << ")" << std::endl;
+    std::cout << "  -a address  Address to bind to (default: " << DEFAULT_ADDR << ")" << std::endl;
+}
+
+int main(int argc, char *argv[]) {
+    int port = DEFAULT_PORT;
+    std::string bind_addr = DEFAULT_ADDR;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "p:a:h")) != -1) {
+        switch (opt) {
+            case 'p':
+                port = atoi(optarg);
+                break;
+            case 'a':
+                bind_addr = optarg;
+                break;
+            case 'h':
+            default:
+                print_usage(argv[0]);
+                return 0;
+        }
+    }
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
         return 1;
     }
 
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int opt_sock = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt_sock, sizeof(opt_sock));
 
     struct sockaddr_in address;
     address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
+    if (inet_aton(bind_addr.c_str(), &address.sin_addr) == 0) {
+        std::cerr << "Invalid bind address: " << bind_addr << std::endl;
+        return 1;
+    }
+    address.sin_port = htons(port);
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("bind");
@@ -133,7 +166,7 @@ int main() {
         return 1;
     }
 
-    std::cout << "Server listening on port " << PORT << std::endl;
+    std::cout << "Server listening on " << bind_addr << ":" << port << std::endl;
 
     while (true) {
         struct sockaddr_in client_address;
@@ -144,7 +177,7 @@ int main() {
             continue;
         }
 
-        std::cout << "Client connected" << std::endl;
+        std::cout << "Client connected from " << inet_ntoa(client_address.sin_addr) << std::endl;
         handle_client(client_fd);
         close(client_fd);
         std::cout << "Client disconnected" << std::endl;

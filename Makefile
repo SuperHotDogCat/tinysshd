@@ -1,13 +1,13 @@
 CXX = g++
 CXXFLAGS = -Wall -Wextra -std=c++11
 
-TARGET = remote_terminal
-SRC = server.cpp
+all: server client
 
-all: $(TARGET)
+server: server.cpp
+	$(CXX) $(CXXFLAGS) -o server server.cpp
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $(TARGET) $(SRC)
+client: client.cpp
+	$(CXX) $(CXXFLAGS) -o client client.cpp
 
 clean:
-	rm -f $(TARGET)
+	rm -f server client remote_terminal
