@@ -13,10 +13,13 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <signal.h>
+#include <algorithm>
 
 #define DEFAULT_PORT 2222
 #define DEFAULT_ADDR "0.0.0.0"
 #define BUFFER_SIZE 4096
+
+std::string global_password;
 
 // Clean up zombie processes
 void sigchld_handler(int) {
@@ -25,7 +28,58 @@ void sigchld_handler(int) {
     errno = saved_errno;
 }
 
+std::string generate_password(int length = 12) {
+    const char charset[] = "0123456789"
+                           "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                           "abcdefghijklmnopqrstuvwxyz";
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        perror("open /dev/urandom");
+        return "fallback123";
+    }
+
+    std::string password;
+    for (int i = 0; i < length; ++i) {
+        unsigned char c;
+        if (read(fd, &c, 1) != 1) break;
+        password += charset[c % (sizeof(charset) - 1)];
+    }
+    close(fd);
+    return password;
+}
+
+bool authenticate(int client_fd) {
+    const char *prompt = "Password: ";
+    write(client_fd, prompt, strlen(prompt));
+
+    std::string input;
+    char c;
+    while (true) {
+        ssize_t n = read(client_fd, &c, 1);
+        if (n <= 0) return false;
+        if (c == '\n' || c == '\r') break;
+        input += c;
+        if (input.length() > 128) return false; // Prevent buffer overflow
+    }
+
+    if (input == global_password) {
+        const char *msg = "Authentication successful.\n";
+        write(client_fd, msg, strlen(msg));
+        return true;
+    } else {
+        const char *msg = "Authentication failed.\n";
+        write(client_fd, msg, strlen(msg));
+        return false;
+    }
+}
+
 void handle_client(int client_fd, int server_fd) {
+    if (!authenticate(client_fd)) {
+        close(client_fd);
+        close(server_fd);
+        exit(0);
+    }
+
     int master_fd = posix_openpt(O_RDWR);
     if (master_fd < 0) {
         perror("posix_openpt");
@@ -61,7 +115,7 @@ void handle_client(int client_fd, int server_fd) {
     if (pid == 0) {
         // Child process (PTY slave side)
         close(client_fd);
-        close(server_fd); // Fix FD leak
+        close(server_fd);
         setsid();
 
         int slave_fd = open(slave_name, O_RDWR);
@@ -87,7 +141,7 @@ void handle_client(int client_fd, int server_fd) {
         exit(1);
     } else {
         // Parent process (Proxy loop)
-        close(server_fd); // Fix FD leak in the process that handles client I/O
+        close(server_fd);
         fd_set read_fds;
         char buffer[BUFFER_SIZE];
 
@@ -120,7 +174,7 @@ void handle_client(int client_fd, int server_fd) {
         close(master_fd);
         close(client_fd);
         waitpid(pid, NULL, 0);
-        exit(0); // Exit the client-handling process
+        exit(0);
     }
 }
 
@@ -149,6 +203,11 @@ int main(int argc, char *argv[]) {
                 return 0;
         }
     }
+
+    global_password = generate_password();
+    std::cout << "------------------------------------------" << std::endl;
+    std::cout << "Generated password: " << global_password << std::endl;
+    std::cout << "------------------------------------------" << std::endl;
 
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
@@ -202,11 +261,8 @@ int main(int argc, char *argv[]) {
 
         pid_t pid = fork();
         if (pid == 0) {
-            // Child handling process
             handle_client(client_fd, server_fd);
-            // handle_client calls exit(0)
         } else if (pid > 0) {
-            // Parent listening process
             close(client_fd);
         } else {
             perror("fork");

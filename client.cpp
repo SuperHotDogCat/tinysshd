@@ -16,18 +16,23 @@
 #define BUFFER_SIZE 4096
 
 struct termios orig_termios;
+bool is_raw_mode = false;
 
 void reset_terminal_mode() {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+    if (is_raw_mode) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+        is_raw_mode = false;
+    }
 }
 
 void set_raw_mode() {
-    tcgetattr(STDIN_FILENO, &orig_termios);
-    atexit(reset_terminal_mode);
-
-    struct termios raw = orig_termios;
-    cfmakeraw(&raw);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    if (!is_raw_mode) {
+        tcgetattr(STDIN_FILENO, &orig_termios);
+        struct termios raw = orig_termios;
+        cfmakeraw(&raw);
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+        is_raw_mode = true;
+    }
 }
 
 void print_usage(char *prog_name) {
@@ -55,6 +60,8 @@ int main(int argc, char *argv[]) {
                 return 0;
         }
     }
+
+    atexit(reset_terminal_mode);
 
     struct addrinfo hints, *servinfo, *p;
     memset(&hints, 0, sizeof(hints));
@@ -92,13 +99,31 @@ int main(int argc, char *argv[]) {
     freeaddrinfo(servinfo);
 
     std::cout << "Connected to " << host << ":" << port << std::endl;
-    std::cout << "Switching to raw mode..." << std::endl;
 
+    // Password authentication phase (in cooked mode)
+    char buffer[BUFFER_SIZE];
+    while (true) {
+        ssize_t n = read(sock, buffer, sizeof(buffer) - 1);
+        if (n <= 0) break;
+        buffer[n] = '\0';
+        std::cout << buffer << std::flush;
+
+        if (strstr(buffer, "Password: ")) {
+            std::string pwd;
+            std::getline(std::cin, pwd);
+            pwd += "\n";
+            write(sock, pwd.c_str(), pwd.length());
+        } else if (strstr(buffer, "Authentication successful.")) {
+            break;
+        } else if (strstr(buffer, "Authentication failed.")) {
+            return 1;
+        }
+    }
+
+    std::cout << "Switching to raw mode..." << std::endl;
     set_raw_mode();
 
     fd_set read_fds;
-    char buffer[BUFFER_SIZE];
-
     while (true) {
         FD_ZERO(&read_fds);
         FD_SET(STDIN_FILENO, &read_fds);
