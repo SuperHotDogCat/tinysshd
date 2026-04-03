@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -Wall -Wextra -std=c++11
+CXXFLAGS = -Wall -Wextra -std=c++11 -I/opt/homebrew/include -L/opt/homebrew/lib -lssl -lcrypto
 
 all: server client
 
