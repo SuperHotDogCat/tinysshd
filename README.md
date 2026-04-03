@@ -29,6 +29,13 @@ make
 
 ## 使い方
 
+### 0. 証明書発行(rsa)
+```
+openssl req -x509 -newkey rsa:2048 \
+-keyout key.pem -out cert.pem \
+-days 365 -nodes
+```
+
 ### 1. サーバーの起動
 
 サーバーマシン上で起動します。表示されるパスワードを控えてください。

@@ -14,6 +14,8 @@
 #include <getopt.h>
 #include <signal.h>
 #include <algorithm>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define DEFAULT_PORT 2222
 #define DEFAULT_ADDR "0.0.0.0"
@@ -48,14 +50,14 @@ std::string generate_password(int length = 12) {
     return password;
 }
 
-bool authenticate(int client_fd) {
+bool authenticate(SSL* ssl, int client_fd) {
     const char *prompt = "Password: ";
-    write(client_fd, prompt, strlen(prompt));
+    SSL_write(ssl, prompt, strlen(prompt));
 
     std::string input;
     char c;
     while (true) {
-        ssize_t n = read(client_fd, &c, 1);
+        ssize_t n = SSL_read(ssl, &c, 1);
         if (n <= 0) return false;
         if (c == '\n' || c == '\r') break;
         input += c;
@@ -64,17 +66,17 @@ bool authenticate(int client_fd) {
 
     if (input == global_password) {
         const char *msg = "Authentication successful.\n";
-        write(client_fd, msg, strlen(msg));
+        SSL_write(ssl, msg, strlen(msg));
         return true;
     } else {
         const char *msg = "Authentication failed.\n";
-        write(client_fd, msg, strlen(msg));
+        SSL_write(ssl, msg, strlen(msg));
         return false;
     }
 }
 
-void handle_client(int client_fd, int server_fd) {
-    if (!authenticate(client_fd)) {
+void handle_client(SSL* ssl, int client_fd, int server_fd) {
+    if (!authenticate(ssl, client_fd)) {
         close(client_fd);
         close(server_fd);
         exit(0);
@@ -159,7 +161,8 @@ void handle_client(int client_fd, int server_fd) {
             }
 
             if (FD_ISSET(client_fd, &read_fds)) {
-                ssize_t n = read(client_fd, buffer, sizeof(buffer));
+                // ssize_t n = read(client_fd, buffer, sizeof(buffer));
+                ssize_t n = SSL_read(ssl, buffer, sizeof(buffer));
                 if (n <= 0) break;
                 if (write(master_fd, buffer, n) != n) break;
             }
@@ -167,7 +170,7 @@ void handle_client(int client_fd, int server_fd) {
             if (FD_ISSET(master_fd, &read_fds)) {
                 ssize_t n = read(master_fd, buffer, sizeof(buffer));
                 if (n <= 0) break;
-                if (write(client_fd, buffer, n) != n) break;
+                if (SSL_write(ssl, buffer, n) != n) break;
             }
         }
 
@@ -247,6 +250,13 @@ int main(int argc, char *argv[]) {
 
     std::cout << "Server listening on " << bind_addr << ":" << port << std::endl;
 
+    // SSL設定
+    // TODO: Error処理
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    // 証明書設定
+    SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM);
+
     while (true) {
         struct sockaddr_in client_address;
         socklen_t addrlen = sizeof(client_address);
@@ -256,12 +266,19 @@ int main(int argc, char *argv[]) {
             perror("accept");
             continue;
         }
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, client_fd);
+        // SSL_connectがclient側にあって初めてハンドシェイク成立
+        if (SSL_accept(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            exit(1);
+        }
 
         std::cout << "Client connected from " << inet_ntoa(client_address.sin_addr) << std::endl;
 
         pid_t pid = fork();
         if (pid == 0) {
-            handle_client(client_fd, server_fd);
+            handle_client(ssl, client_fd, server_fd);
         } else if (pid > 0) {
             close(client_fd);
         } else {

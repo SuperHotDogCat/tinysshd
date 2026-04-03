@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <netdb.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define DEFAULT_PORT "2222"
 #define DEFAULT_HOST "127.0.0.1"
@@ -97,13 +99,23 @@ int main(int argc, char *argv[]) {
     }
 
     freeaddrinfo(servinfo);
+    // sockのSSL化
+    // SSL設定
+    // TODO: Error処理
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM);
+    SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM);
+    SSL* ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sock);
+    SSL_connect(ssl); // SSL_acceptがserver側にあって初めてハンドシェイク成立
 
     std::cout << "Connected to " << host << ":" << port << std::endl;
 
     // Password authentication phase (in cooked mode)
     char buffer[BUFFER_SIZE];
     while (true) {
-        ssize_t n = read(sock, buffer, sizeof(buffer) - 1);
+        ssize_t n = SSL_read(ssl, buffer, sizeof(buffer) - 1);
         if (n <= 0) break;
         buffer[n] = '\0';
         std::cout << buffer << std::flush;
@@ -112,7 +124,7 @@ int main(int argc, char *argv[]) {
             std::string pwd;
             std::getline(std::cin, pwd);
             pwd += "\n";
-            write(sock, pwd.c_str(), pwd.length());
+            SSL_write(ssl, pwd.c_str(), pwd.length());
         } else if (strstr(buffer, "Authentication successful.")) {
             break;
         } else if (strstr(buffer, "Authentication failed.")) {
@@ -137,11 +149,11 @@ int main(int argc, char *argv[]) {
         if (FD_ISSET(STDIN_FILENO, &read_fds)) {
             ssize_t n = read(STDIN_FILENO, buffer, sizeof(buffer));
             if (n <= 0) break;
-            if (write(sock, buffer, n) != (ssize_t)n) break;
+            if (SSL_write(ssl, buffer, n) != (ssize_t)n) break;
         }
 
         if (FD_ISSET(sock, &read_fds)) {
-            ssize_t n = read(sock, buffer, sizeof(buffer));
+            ssize_t n = SSL_read(ssl, buffer, sizeof(buffer));
             if (n <= 0) break;
             if (write(STDOUT_FILENO, buffer, n) != (ssize_t)n) break;
         }
